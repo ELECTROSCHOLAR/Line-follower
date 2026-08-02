@@ -1,4 +1,5 @@
 #include <TFT_eSPI.h>
+#include <Adafruit_NeoPixel.h>
 
 TFT_eSPI tft = TFT_eSPI();
 
@@ -27,6 +28,11 @@ TFT_eSPI tft = TFT_eSPI();
 // New Hardware Pins
 #define PIN_BUZZER 4
 #define PIN_HALL 16
+#define PIN_RGB 0
+
+// ===== WS2812 LED CONFIGURATION =====
+#define NUM_LEDS 3
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, PIN_RGB, NEO_GRB + NEO_KHZ800);
 
 // ===== SYSTEM VARIABLES =====
 int baseSpeed = 150;
@@ -52,11 +58,11 @@ const int BEEP_GAP = 100;      // gap between double beeps in ms
 const int HALL_COOLDOWN = 1000;// cooldown to prevent rapid re-triggering
 
 // Menu & State Machine
-enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_CALIB_WHITE, STATE_CALIB_BLACK };
+enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_CALIB_WHITE, STATE_CALIB_BLACK, STATE_LED_TEST };
 SystemState currentState = STATE_MENU;
 
 int menuIndex = 0;
-const int MENU_ITEMS = 8; 
+const int MENU_ITEMS = 9; // Increased for LED Test Mode
 bool isEditing = false;
 bool redrawMenu = true;
 
@@ -152,6 +158,7 @@ void updateMenuDisplay() {
         "Start Run Mode", 
         "IR View", 
         "Calibrate Dual", 
+        "LED Test", 
         "Threshold", 
         "Base Speed", 
         "Kp", 
@@ -169,14 +176,14 @@ void updateMenuDisplay() {
         
         tft.print(items[i]);
         
-        if (i >= 3) {
+        if (i >= 4) {
             tft.print(": ");
             switch(i) {
-                case 3: tft.println("DYNAMIC"); break;
-                case 4: tft.println(baseSpeed); break;
-                case 5: tft.println(Kp, 3); break;
-                case 6: tft.println(Ki, 4); break;
-                case 7: tft.println(Kd, 3); break;
+                case 4: tft.println("DYNAMIC"); break;
+                case 5: tft.println(baseSpeed); break;
+                case 6: tft.println(Kp, 3); break;
+                case 7: tft.println(Ki, 4); break;
+                case 8: tft.println(Kd, 3); break;
             }
         } else {
             tft.println();
@@ -220,6 +227,16 @@ void processButtons() {
                     tft.println("Place on WHITE");
                     tft.println("Press START");
                 }
+                else if (menuIndex == 3) {
+                    currentState = STATE_LED_TEST;
+                    tft.fillScreen(TFT_BLACK);
+                    tft.setTextSize(2);
+                    tft.setCursor(0, 0);
+                    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+                    tft.println("-- LED TEST MODE --");
+                    tft.setTextColor(TFT_RED, TFT_BLACK);
+                    tft.println("\n[START] to Exit");
+                }
                 else {
                     isEditing = true; 
                     redrawMenu = true; 
@@ -233,19 +250,19 @@ void processButtons() {
             
             if (pressedUp) {
                 switch(menuIndex) {
-                    case 4: baseSpeed += 10; break;
-                    case 5: Kp += 0.01; break;
-                    case 6: Ki += 0.001; break;
-                    case 7: Kd += 0.01; break;
+                    case 5: baseSpeed += 10; break;
+                    case 6: Kp += 0.01; break;
+                    case 7: Ki += 0.001; break;
+                    case 8: Kd += 0.01; break;
                 }
                 redrawMenu = true;
             }
             if (pressedDown) {
                 switch(menuIndex) {
-                    case 4: baseSpeed -= 10; break;
-                    case 5: Kp -= 0.01; break;
-                    case 6: Ki -= 0.001; break;
-                    case 7: Kd -= 0.01; break;
+                    case 5: baseSpeed -= 10; break;
+                    case 6: Kp -= 0.01; break;
+                    case 7: Ki -= 0.001; break;
+                    case 8: Kd -= 0.01; break;
                 }
                 redrawMenu = true;
             }
@@ -285,10 +302,13 @@ void processButtons() {
         }
     }
     else {
+        // Exit from RUN, IR_VIEW, or LED_TEST modes
         if (pressedStart) {
             currentState = STATE_MENU;
             setMotor(AIN1, AIN2, PWMA, 0);
             setMotor(BIN1, BIN2, PWMB, 0);
+            strip.clear(); // Turn off LEDs when exiting LED Test
+            strip.show();
             redrawMenu = true;
         }
     }
@@ -316,6 +336,11 @@ void setup() {
     pinMode(PIN_BUZZER, OUTPUT);
     digitalWrite(PIN_BUZZER, LOW); // Ensure buzzer is off by default
     pinMode(PIN_HALL, INPUT_PULLUP); // Use pullup for hall sensor
+
+    // Initialize WS2812 LEDs
+    strip.begin();
+    strip.show(); // Initialize all pixels to 'off'
+    strip.setBrightness(50); // Set brightness to ~20%
 
     tft.init();
     tft.setRotation(1);
@@ -351,6 +376,28 @@ void loop() {
     if (currentState == STATE_MENU) {
         if (redrawMenu) updateMenuDisplay();
     } 
+    else if (currentState == STATE_LED_TEST) {
+        // Non-blocking RGB Rainbow logic
+        static unsigned long lastLedUpdate = 0;
+        static long firstPixelHue = 0;
+        
+        if (millis() - lastLedUpdate > 10) { // Update every 10ms for smooth transition
+            // LED 0 and LED 1 cycle all colors (rainbow effect)
+            strip.setPixelColor(0, strip.ColorHSV(firstPixelHue));
+            strip.setPixelColor(1, strip.ColorHSV(firstPixelHue));
+            
+            // LED 2 stays solid orange (Red = 255, Green = 165, Blue = 0)
+            strip.setPixelColor(2, strip.Color(255, 165, 0));
+            
+            strip.show();
+            
+            firstPixelHue += 256; // Increment hue
+            if (firstPixelHue >= 65536) firstPixelHue = 0; // Wrap around
+            
+            lastLedUpdate = millis();
+        }
+        yield();
+    }
     else if (currentState == STATE_IR_VIEW) {
         static unsigned long lastDebugRefresh = 0;
         if (millis() - lastDebugRefresh > 300) {
@@ -397,12 +444,12 @@ void loop() {
 
         float weightSum = 0; float activeSum = 0;
 
-        if (l)  { weightSum += -2.5; activeSum += 1; }
-        if (l2) { weightSum += -1.5; activeSum += 1; }
-        if (c1) { weightSum += -0.5;  activeSum += 1; }
-        if (c2) { weightSum += 0.5;  activeSum += 1; }
-        if (r2) { weightSum += 1.5;  activeSum += 1; }
-        if (r)  { weightSum += 2.5;  activeSum += 1; }
+        if (l)  { weightSum += -3; activeSum += 1; }
+        if (l2) { weightSum += -2; activeSum += 1; }
+        if (c1) { weightSum += 0;  activeSum += 1; }
+        if (c2) { weightSum += 0;  activeSum += 1; }
+        if (r2) { weightSum += 2;  activeSum += 1; }
+        if (r)  { weightSum += 3;  activeSum += 1; }
 
         float error;
         if (activeSum > 0) {
