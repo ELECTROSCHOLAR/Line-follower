@@ -27,9 +27,9 @@ TFT_eSPI tft = TFT_eSPI();
 // ===== SYSTEM VARIABLES =====
 int baseSpeed = 150;
 int threshold = 2000;
-float Kp = 0.05;
+float Kp = 0.50;
 float Ki = 0.0;
-float Kd = 0.02;
+float Kd = 1.00;
 
 float lastError = 0;
 float integral = 0;
@@ -40,14 +40,15 @@ enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_CALIBRATE };
 SystemState currentState = STATE_MENU;
 
 int menuIndex = 0;
-const int MENU_ITEMS = 8; // Expanded menu
+const int MENU_ITEMS = 8; 
 bool isEditing = false;
 bool redrawMenu = true;
 
-// Calibration Variables
+// Calibration & Reset Variables
 unsigned long calibStartTime = 0;
 int calibMin = 4095;
 int calibMax = 0;
+unsigned long startButtonHeldTime = 0; 
 
 // ===== ROBUST DEBOUNCE LOGIC =====
 struct Button {
@@ -60,7 +61,7 @@ struct Button {
 Button btnStart = {BTN_START, HIGH, HIGH, 0};
 Button btnUp    = {BTN_UP, HIGH, HIGH, 0};
 Button btnDown  = {BTN_DOWN, HIGH, HIGH, 0};
-const int debounceDelay = 50; 
+const int debounceDelay = 150; 
 
 bool checkPress(Button &b) {
     bool currentReading = digitalRead(b.pin);
@@ -124,10 +125,8 @@ void updateMenuDisplay() {
             tft.setTextColor(TFT_WHITE, TFT_BLACK);
         }
         
-        // Print item name
         tft.print(items[i]);
         
-        // Only print values for editable parameters (index 3 to 7)
         if (i >= 3) {
             tft.print(": ");
             switch(i) {
@@ -138,7 +137,7 @@ void updateMenuDisplay() {
                 case 7: tft.println(Kd, 3); break;
             }
         } else {
-            tft.println(); // Just a new line for commands
+            tft.println();
         }
     }
     redrawMenu = false;
@@ -157,10 +156,14 @@ void processButtons() {
             if (pressedStart) { 
                 if (menuIndex == 0) {
                     currentState = STATE_RUN;
+                    
+                    // Simple, static text for run mode
                     tft.fillScreen(TFT_BLACK);
-                    tft.setCursor(0,0);
+                    tft.setTextSize(3);
                     tft.setTextColor(TFT_GREEN, TFT_BLACK);
-                    tft.println("RUNNING PID...");
+                    tft.setCursor(40, 100);
+                    tft.println("Running.......");
+                    
                     integral = 0;
                     lastError = 0;
                 } 
@@ -186,7 +189,6 @@ void processButtons() {
                 }
             }
         } else {
-            // Edit Mode (Only applies to indices 3 through 7)
             if (pressedStart) { 
                 isEditing = false; 
                 redrawMenu = true; 
@@ -215,7 +217,6 @@ void processButtons() {
         }
     } 
     else {
-        // If in Run, IR View, or Calibrate mode, pressing START halts and returns to MENU
         if (pressedStart) {
             currentState = STATE_MENU;
             setMotor(AIN1, AIN2, PWMA, 0);
@@ -228,6 +229,9 @@ void processButtons() {
 // ===== MAIN ROUTINES =====
 
 void setup() {
+    // --- WAIT FOR POWER STABILIZATION ---
+    delay(2000); 
+    
     pinMode(BTN_START, INPUT_PULLUP);
     pinMode(BTN_UP, INPUT_PULLUP);
     pinMode(BTN_DOWN, INPUT_PULLUP);
@@ -246,6 +250,26 @@ void setup() {
 }
 
 void loop() {
+    // --- 5-SECOND HARDWARE RESET CHECK ---
+    if (digitalRead(BTN_START) == LOW) {
+        if (startButtonHeldTime == 0) {
+            startButtonHeldTime = millis();
+        } 
+        else if (millis() - startButtonHeldTime > 5000) {
+            setMotor(AIN1, AIN2, PWMA, 0);
+            setMotor(BIN1, BIN2, PWMB, 0);
+            tft.fillScreen(TFT_RED);
+            tft.setTextColor(TFT_WHITE);
+            tft.setTextSize(3);
+            tft.setCursor(20, 100);
+            tft.println("SYSTEM RESET");
+            delay(1000);
+            ESP.restart(); 
+        }
+    } else {
+        startButtonHeldTime = 0; 
+    }
+
     processButtons();
 
     if (currentState == STATE_MENU) {
@@ -253,7 +277,7 @@ void loop() {
     } 
     else if (currentState == STATE_IR_VIEW) {
         static unsigned long lastDebugRefresh = 0;
-        if (millis() - lastDebugRefresh > 200) {
+        if (millis() - lastDebugRefresh > 300) {
             s1 = analogRead(IR1); s2 = analogRead(IR2); s3 = analogRead(IR3);
             s4 = analogRead(IR4); s5 = analogRead(IR5); s6 = analogRead(IR6);
 
@@ -274,21 +298,17 @@ void loop() {
         }
     }
     else if (currentState == STATE_CALIBRATE) {
-        // Read all sensors rapidly
         int readings[6] = {
             analogRead(IR1), analogRead(IR2), analogRead(IR3), 
             analogRead(IR4), analogRead(IR5), analogRead(IR6)
         };
         
-        // Find min and max
         for(int i = 0; i < 6; i++) {
             if (readings[i] < calibMin) calibMin = readings[i];
             if (readings[i] > calibMax) calibMax = readings[i];
         }
 
-        // Auto-exit calibration after 5 seconds
         if (millis() - calibStartTime > 5000) {
-            // Calculate perfect midpoint threshold
             threshold = (calibMin + calibMax) / 2;
             
             tft.fillScreen(TFT_BLACK);
@@ -297,14 +317,14 @@ void loop() {
             tft.println("DONE!");
             tft.print("New Thresh: ");
             tft.println(threshold);
-            delay(1500); // Show result briefly before returning to menu
+            delay(1500); 
             
             currentState = STATE_MENU;
             redrawMenu = true;
         }
     }
     else if (currentState == STATE_RUN) {
-        // ---- PID Execution Block ----
+        // ---- PID Execution Block (Fast & Uninterrupted) ----
         s1 = analogRead(IR1); s2 = analogRead(IR2); s3 = analogRead(IR3);
         s4 = analogRead(IR4); s5 = analogRead(IR5); s6 = analogRead(IR6);
 
@@ -342,7 +362,8 @@ void loop() {
 
         setMotor(AIN1, AIN2, PWMA, rightSpeed);
         setMotor(BIN1, BIN2, PWMB, leftSpeed);
-        
-        delay(10);
     }
+    
+    // Prevent Watchdog crashes
+    delay(5); 
 }
