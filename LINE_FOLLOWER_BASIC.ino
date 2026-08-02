@@ -40,7 +40,7 @@ enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_CALIBRATE };
 SystemState currentState = STATE_MENU;
 
 int menuIndex = 0;
-const int MENU_ITEMS = 8; 
+const int MENU_ITEMS = 8; // Expanded menu
 bool isEditing = false;
 bool redrawMenu = true;
 
@@ -124,8 +124,10 @@ void updateMenuDisplay() {
             tft.setTextColor(TFT_WHITE, TFT_BLACK);
         }
         
+        // Print item name
         tft.print(items[i]);
         
+        // Only print values for editable parameters (index 3 to 7)
         if (i >= 3) {
             tft.print(": ");
             switch(i) {
@@ -136,7 +138,7 @@ void updateMenuDisplay() {
                 case 7: tft.println(Kd, 3); break;
             }
         } else {
-            tft.println();
+            tft.println(); // Just a new line for commands
         }
     }
     redrawMenu = false;
@@ -155,25 +157,10 @@ void processButtons() {
             if (pressedStart) { 
                 if (menuIndex == 0) {
                     currentState = STATE_RUN;
-                    
-                    // --- Setup the Static UI for the Bar Graph ---
                     tft.fillScreen(TFT_BLACK);
-                    tft.setTextSize(2);
-                    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-                    tft.setCursor(70, 10);
-                    tft.println("--- RUNNING ---");
-                    
-                    // Draw a baseline for the graph
-                    tft.drawLine(0, 205, 320, 205, TFT_DARKGREY);
-                    
-                    // Draw sensor labels horizontally
-                    const char* labels[6] = {"L1", "L2", "C1", "C2", "R2", "R1"};
-                    int xPos[6] = {15, 65, 115, 165, 215, 265};
-                    for(int i = 0; i < 6; i++) {
-                        tft.setCursor(xPos[i] + 5, 215);
-                        tft.print(labels[i]);
-                    }
-                    
+                    tft.setCursor(0,0);
+                    tft.setTextColor(TFT_GREEN, TFT_BLACK);
+                    tft.println("RUNNING PID...");
                     integral = 0;
                     lastError = 0;
                 } 
@@ -199,6 +186,7 @@ void processButtons() {
                 }
             }
         } else {
+            // Edit Mode (Only applies to indices 3 through 7)
             if (pressedStart) { 
                 isEditing = false; 
                 redrawMenu = true; 
@@ -227,7 +215,7 @@ void processButtons() {
         }
     } 
     else {
-        // If running, viewing, or calibrating, START returns to menu
+        // If in Run, IR View, or Calibrate mode, pressing START halts and returns to MENU
         if (pressedStart) {
             currentState = STATE_MENU;
             setMotor(AIN1, AIN2, PWMA, 0);
@@ -286,17 +274,21 @@ void loop() {
         }
     }
     else if (currentState == STATE_CALIBRATE) {
+        // Read all sensors rapidly
         int readings[6] = {
             analogRead(IR1), analogRead(IR2), analogRead(IR3), 
             analogRead(IR4), analogRead(IR5), analogRead(IR6)
         };
         
+        // Find min and max
         for(int i = 0; i < 6; i++) {
             if (readings[i] < calibMin) calibMin = readings[i];
             if (readings[i] > calibMax) calibMax = readings[i];
         }
 
+        // Auto-exit calibration after 5 seconds
         if (millis() - calibStartTime > 5000) {
+            // Calculate perfect midpoint threshold
             threshold = (calibMin + calibMax) / 2;
             
             tft.fillScreen(TFT_BLACK);
@@ -305,7 +297,7 @@ void loop() {
             tft.println("DONE!");
             tft.print("New Thresh: ");
             tft.println(threshold);
-            delay(1500); 
+            delay(1500); // Show result briefly before returning to menu
             
             currentState = STATE_MENU;
             redrawMenu = true;
@@ -350,31 +342,6 @@ void loop() {
 
         setMotor(AIN1, AIN2, PWMA, rightSpeed);
         setMotor(BIN1, BIN2, PWMB, leftSpeed);
-
-        // --- NON-BLOCKING BAR GRAPH ANIMATION ---
-        static unsigned long lastGraphUpdate = 0;
-        if (millis() - lastGraphUpdate > 50) { // Updates 20 times a second
-            
-            // Map the physical sensors from Left to Right (L1, L2, C1, C2, R2, R1)
-            int sensorVals[6] = {s6, s5, s3, s4, s2, s1}; 
-            int xPositions[6] = {15, 65, 115, 165, 215, 265}; // Spaced out for 320px width
-
-            for (int i = 0; i < 6; i++) {
-                // Constrain and map 0-4095 analog read to 0-150 pixels for bar height
-                int rawVal = constrain(sensorVals[i], 0, 4095);
-                int barHeight = map(rawVal, 0, 4095, 0, 150);
-                
-                // Color is Green if above threshold, Red if below
-                uint16_t barColor = (sensorVals[i] > threshold) ? TFT_GREEN : TFT_RED;
-
-                // Draw the active color bar rising from the bottom (Y = 200)
-                tft.fillRect(xPositions[i], 200 - barHeight, 30, barHeight, barColor);
-                
-                // Draw a black box dynamically shrinking above it to erase old trailing pixels
-                tft.fillRect(xPositions[i], 40, 30, 160 - barHeight, TFT_BLACK);
-            }
-            lastGraphUpdate = millis();
-        }
         
         delay(10);
     }
