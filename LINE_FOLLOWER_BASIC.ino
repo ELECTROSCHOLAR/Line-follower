@@ -24,19 +24,35 @@ TFT_eSPI tft = TFT_eSPI();
 #define BIN1 13
 #define BIN2 12
 
+// New Hardware Pins
+#define PIN_BUZZER 4
+#define PIN_HALL 16
+
 // ===== SYSTEM VARIABLES =====
 int baseSpeed = 150;
-int threshold = 2000;
-float Kp = 0.50;
+float Kp = 0.5;
 float Ki = 0.0;
-float Kd = 1.00;
+float Kd = 1.0;
 
 float lastError = 0;
 float integral = 0;
 int s1, s2, s3, s4, s5, s6;
 
+// Dual Calibration Thresholds for each sensor (Index 0-5)
+int whiteLevel[6] = {4095, 4095, 4095, 4095, 4095, 4095};
+int blackLevel[6] = {0, 0, 0, 0, 0, 0};
+int sensorThreshold[6] = {2000, 2000, 2000, 2000, 2000, 2000};
+
+// Buzzer State Machine Variables
+unsigned long buzzerTimer = 0;
+unsigned long lastHallDetectTime = 0;
+int beepState = 0; 
+const int BEEP_DURATION = 100; // duration of a single beep in ms
+const int BEEP_GAP = 100;      // gap between double beeps in ms
+const int HALL_COOLDOWN = 1000;// cooldown to prevent rapid re-triggering
+
 // Menu & State Machine
-enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_CALIBRATE };
+enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_CALIB_WHITE, STATE_CALIB_BLACK };
 SystemState currentState = STATE_MENU;
 
 int menuIndex = 0;
@@ -44,10 +60,7 @@ const int MENU_ITEMS = 8;
 bool isEditing = false;
 bool redrawMenu = true;
 
-// Calibration & Reset Variables
-unsigned long calibStartTime = 0;
-int calibMin = 4095;
-int calibMax = 0;
+// Calibration Sub-State Control
 unsigned long startButtonHeldTime = 0; 
 
 // ===== ROBUST DEBOUNCE LOGIC =====
@@ -97,6 +110,35 @@ void setMotor(int in1, int in2, int pwmPin, int speed) {
     analogWrite(pwmPin, constrain(speed, 0, 255));
 }
 
+// Non-blocking buzzer logic to prevent crashing or halting the PID loop
+void handleBuzzer() {
+    // Check if hall sensor goes low and we are not already beeping or in cooldown
+    if (digitalRead(PIN_HALL) == LOW && beepState == 0 && (millis() - lastHallDetectTime > HALL_COOLDOWN)) {
+        beepState = 1;
+        buzzerTimer = millis();
+        digitalWrite(PIN_BUZZER, HIGH); // Start first beep
+        lastHallDetectTime = millis();
+    }
+
+    // State 1: First beep is active
+    if (beepState == 1 && millis() - buzzerTimer > BEEP_DURATION) {
+        digitalWrite(PIN_BUZZER, LOW); // Turn off
+        beepState = 2;
+        buzzerTimer = millis();
+    }
+    // State 2: Gap between beeps
+    else if (beepState == 2 && millis() - buzzerTimer > BEEP_GAP) {
+        digitalWrite(PIN_BUZZER, HIGH); // Start second beep
+        beepState = 3;
+        buzzerTimer = millis();
+    }
+    // State 3: Second beep is active
+    else if (beepState == 3 && millis() - buzzerTimer > BEEP_DURATION) {
+        digitalWrite(PIN_BUZZER, LOW); // Turn off
+        beepState = 0; // Reset state machine
+    }
+}
+
 // ===== MENU LOGIC =====
 
 void updateMenuDisplay() {
@@ -109,7 +151,7 @@ void updateMenuDisplay() {
     const char* items[] = {
         "Start Run Mode", 
         "IR View", 
-        "Calibrate IR", 
+        "Calibrate Dual", 
         "Threshold", 
         "Base Speed", 
         "Kp", 
@@ -130,7 +172,7 @@ void updateMenuDisplay() {
         if (i >= 3) {
             tft.print(": ");
             switch(i) {
-                case 3: tft.println(threshold); break;
+                case 3: tft.println("DYNAMIC"); break;
                 case 4: tft.println(baseSpeed); break;
                 case 5: tft.println(Kp, 3); break;
                 case 6: tft.println(Ki, 4); break;
@@ -139,6 +181,7 @@ void updateMenuDisplay() {
         } else {
             tft.println();
         }
+        yield(); // Prevent watchdog triggers during heavy text rendering loops
     }
     redrawMenu = false;
 }
@@ -156,14 +199,11 @@ void processButtons() {
             if (pressedStart) { 
                 if (menuIndex == 0) {
                     currentState = STATE_RUN;
-                    
-                    // Simple, static text for run mode
                     tft.fillScreen(TFT_BLACK);
                     tft.setTextSize(3);
                     tft.setTextColor(TFT_GREEN, TFT_BLACK);
                     tft.setCursor(40, 100);
                     tft.println("Running.......");
-                    
                     integral = 0;
                     lastError = 0;
                 } 
@@ -172,16 +212,13 @@ void processButtons() {
                     tft.fillScreen(TFT_BLACK);
                 }
                 else if (menuIndex == 2) {
-                    currentState = STATE_CALIBRATE;
+                    currentState = STATE_CALIB_WHITE;
                     tft.fillScreen(TFT_BLACK);
                     tft.setCursor(0,0);
-                    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-                    tft.println("CALIBRATING...");
-                    tft.println("Sweep sensors");
-                    tft.println("across the line!");
-                    calibMin = 4095;
-                    calibMax = 0;
-                    calibStartTime = millis();
+                    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+                    tft.println("STEP 1: WHITE");
+                    tft.println("Place on WHITE");
+                    tft.println("Press START");
                 }
                 else {
                     isEditing = true; 
@@ -196,7 +233,6 @@ void processButtons() {
             
             if (pressedUp) {
                 switch(menuIndex) {
-                    case 3: threshold += 100; break;
                     case 4: baseSpeed += 10; break;
                     case 5: Kp += 0.01; break;
                     case 6: Ki += 0.001; break;
@@ -206,7 +242,6 @@ void processButtons() {
             }
             if (pressedDown) {
                 switch(menuIndex) {
-                    case 3: threshold -= 100; break;
                     case 4: baseSpeed -= 10; break;
                     case 5: Kp -= 0.01; break;
                     case 6: Ki -= 0.001; break;
@@ -216,6 +251,39 @@ void processButtons() {
             }
         }
     } 
+    else if (currentState == STATE_CALIB_WHITE) {
+        if (pressedStart) {
+            whiteLevel[0] = analogRead(IR1); whiteLevel[1] = analogRead(IR2); whiteLevel[2] = analogRead(IR3);
+            whiteLevel[3] = analogRead(IR4); whiteLevel[4] = analogRead(IR5); whiteLevel[5] = analogRead(IR6);
+
+            currentState = STATE_CALIB_BLACK;
+            tft.fillScreen(TFT_BLACK);
+            tft.setCursor(0,0);
+            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+            tft.println("STEP 2: BLACK");
+            tft.println("Place on BLACK");
+            tft.println("Press START");
+        }
+    }
+    else if (currentState == STATE_CALIB_BLACK) {
+        if (pressedStart) {
+            blackLevel[0] = analogRead(IR1); blackLevel[1] = analogRead(IR2); blackLevel[2] = analogRead(IR3);
+            blackLevel[3] = analogRead(IR4); blackLevel[4] = analogRead(IR5); blackLevel[5] = analogRead(IR6);
+
+            for(int i = 0; i < 6; i++) {
+                sensorThreshold[i] = (whiteLevel[i] + blackLevel[i]) / 2;
+            }
+
+            tft.fillScreen(TFT_BLACK);
+            tft.setCursor(0,0);
+            tft.setTextColor(TFT_GREEN, TFT_BLACK);
+            tft.println("CALIB SUCCESS!");
+            delay(1500);
+
+            currentState = STATE_MENU;
+            redrawMenu = true;
+        }
+    }
     else {
         if (pressedStart) {
             currentState = STATE_MENU;
@@ -224,13 +292,13 @@ void processButtons() {
             redrawMenu = true;
         }
     }
+    yield(); // Ensure background processing between button cycles
 }
 
 // ===== MAIN ROUTINES =====
 
 void setup() {
-    // --- WAIT FOR POWER STABILIZATION ---
-    delay(2000); 
+    delay(2000); // 2 seconds power stabilization delay
     
     pinMode(BTN_START, INPUT_PULLUP);
     pinMode(BTN_UP, INPUT_PULLUP);
@@ -244,14 +312,22 @@ void setup() {
     pinMode(IR1, INPUT); pinMode(IR2, INPUT); pinMode(IR3, INPUT);
     pinMode(IR4, INPUT); pinMode(IR5, INPUT); pinMode(IR6, INPUT);
 
+    // Initialize New Hardware Pins
+    pinMode(PIN_BUZZER, OUTPUT);
+    digitalWrite(PIN_BUZZER, LOW); // Ensure buzzer is off by default
+    pinMode(PIN_HALL, INPUT_PULLUP); // Use pullup for hall sensor
+
     tft.init();
     tft.setRotation(1);
     updateMenuDisplay();
 }
 
 void loop() {
+    // Handle the non-blocking buzzer state machine
+    handleBuzzer();
+
     // --- 5-SECOND HARDWARE RESET CHECK ---
-    if (digitalRead(BTN_START) == LOW) {
+    if (digitalRead(BTN_START) == LOW && (currentState == STATE_MENU)) {
         if (startButtonHeldTime == 0) {
             startButtonHeldTime = millis();
         } 
@@ -296,50 +372,37 @@ void loop() {
             
             lastDebugRefresh = millis();
         }
-    }
-    else if (currentState == STATE_CALIBRATE) {
-        int readings[6] = {
-            analogRead(IR1), analogRead(IR2), analogRead(IR3), 
-            analogRead(IR4), analogRead(IR5), analogRead(IR6)
-        };
-        
-        for(int i = 0; i < 6; i++) {
-            if (readings[i] < calibMin) calibMin = readings[i];
-            if (readings[i] > calibMax) calibMax = readings[i];
-        }
-
-        if (millis() - calibStartTime > 5000) {
-            threshold = (calibMin + calibMax) / 2;
-            
-            tft.fillScreen(TFT_BLACK);
-            tft.setCursor(0,0);
-            tft.setTextColor(TFT_GREEN, TFT_BLACK);
-            tft.println("DONE!");
-            tft.print("New Thresh: ");
-            tft.println(threshold);
-            delay(1500); 
-            
-            currentState = STATE_MENU;
-            redrawMenu = true;
-        }
+        yield(); // Crucial yield point for high frequency display rendering states
     }
     else if (currentState == STATE_RUN) {
-        // ---- PID Execution Block (Fast & Uninterrupted) ----
-        s1 = analogRead(IR1); s2 = analogRead(IR2); s3 = analogRead(IR3);
-        s4 = analogRead(IR4); s5 = analogRead(IR5); s6 = analogRead(IR6);
+        // ---- PID Execution Block ----
+        int raw[6] = {analogRead(IR1), analogRead(IR2), analogRead(IR3), 
+                      analogRead(IR4), analogRead(IR5), analogRead(IR6)};
 
-        bool r = s1 > threshold; bool r2 = s2 > threshold;
-        bool c1 = s3 > threshold; bool c2 = s4 > threshold;
-        bool l2 = s5 > threshold; bool l = s6 > threshold;
+        bool lineDetected[6];
+        for(int i = 0; i < 6; i++) {
+            if (whiteLevel[i] > blackLevel[i]) {
+                lineDetected[i] = (raw[i] < sensorThreshold[i]); 
+            } else {
+                lineDetected[i] = (raw[i] > sensorThreshold[i]); 
+            }
+        }
+
+        bool r  = lineDetected[0]; 
+        bool r2 = lineDetected[1];
+        bool c1 = lineDetected[2]; 
+        bool c2 = lineDetected[3];
+        bool l2 = lineDetected[4]; 
+        bool l  = lineDetected[5];
 
         float weightSum = 0; float activeSum = 0;
 
-        if (l)  { weightSum += -3; activeSum += 1; }
-        if (l2) { weightSum += -2; activeSum += 1; }
-        if (c1) { weightSum += 0;  activeSum += 1; }
-        if (c2) { weightSum += 0;  activeSum += 1; }
-        if (r2) { weightSum += 2;  activeSum += 1; }
-        if (r)  { weightSum += 3;  activeSum += 1; }
+        if (l)  { weightSum += -2.5; activeSum += 1; }
+        if (l2) { weightSum += -1.5; activeSum += 1; }
+        if (c1) { weightSum += -0.5;  activeSum += 1; }
+        if (c2) { weightSum += 0.5;  activeSum += 1; }
+        if (r2) { weightSum += 1.5;  activeSum += 1; }
+        if (r)  { weightSum += 2.5;  activeSum += 1; }
 
         float error;
         if (activeSum > 0) {
@@ -363,7 +426,6 @@ void loop() {
         setMotor(AIN1, AIN2, PWMA, rightSpeed);
         setMotor(BIN1, BIN2, PWMB, leftSpeed);
     }
-    
-    // Prevent Watchdog crashes
-    delay(5); 
+    delay(5);
+    yield(); // Global safety yield to feed the FreeRTOS task watchdog timer
 }
