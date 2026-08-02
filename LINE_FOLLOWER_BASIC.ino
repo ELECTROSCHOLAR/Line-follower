@@ -25,7 +25,7 @@ TFT_eSPI tft = TFT_eSPI();
 #define BIN1 13
 #define BIN2 12
 
-// New Hardware Pins
+// Hardware Pins
 #define PIN_BUZZER 4
 #define PIN_HALL 16
 #define PIN_RGB 0
@@ -44,25 +44,24 @@ float lastError = 0;
 float integral = 0;
 int s1, s2, s3, s4, s5, s6;
 
-// Dual Calibration Thresholds for each sensor (Index 0-5)
+// Sequence Variables
+int startMagnetCount = 0; // Editable in menu to resume specific tasks
+int magnetCount = 0;
+unsigned long lastHallDetectTime = 0;
+const int HALL_COOLDOWN = 1500; 
+int ROTATION_TIME = 600;  // Editable in menu
+
+// Dual Calibration Thresholds
 int whiteLevel[6] = {4095, 4095, 4095, 4095, 4095, 4095};
 int blackLevel[6] = {0, 0, 0, 0, 0, 0};
 int sensorThreshold[6] = {2000, 2000, 2000, 2000, 2000, 2000};
-
-// Buzzer State Machine Variables
-unsigned long buzzerTimer = 0;
-unsigned long lastHallDetectTime = 0;
-int beepState = 0; 
-const int BEEP_DURATION = 100; // duration of a single beep in ms
-const int BEEP_GAP = 100;      // gap between double beeps in ms
-const int HALL_COOLDOWN = 1000;// cooldown to prevent rapid re-triggering
 
 // Menu & State Machine
 enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_CALIB_WHITE, STATE_CALIB_BLACK, STATE_LED_TEST };
 SystemState currentState = STATE_MENU;
 
 int menuIndex = 0;
-const int MENU_ITEMS = 9; // Increased for LED Test Mode
+const int MENU_ITEMS = 12; 
 bool isEditing = false;
 bool redrawMenu = true;
 
@@ -116,35 +115,6 @@ void setMotor(int in1, int in2, int pwmPin, int speed) {
     analogWrite(pwmPin, constrain(speed, 0, 255));
 }
 
-// Non-blocking buzzer logic to prevent crashing or halting the PID loop
-void handleBuzzer() {
-    // Check if hall sensor goes low and we are not already beeping or in cooldown
-    if (digitalRead(PIN_HALL) == LOW && beepState == 0 && (millis() - lastHallDetectTime > HALL_COOLDOWN)) {
-        beepState = 1;
-        buzzerTimer = millis();
-        digitalWrite(PIN_BUZZER, HIGH); // Start first beep
-        lastHallDetectTime = millis();
-    }
-
-    // State 1: First beep is active
-    if (beepState == 1 && millis() - buzzerTimer > BEEP_DURATION) {
-        digitalWrite(PIN_BUZZER, LOW); // Turn off
-        beepState = 2;
-        buzzerTimer = millis();
-    }
-    // State 2: Gap between beeps
-    else if (beepState == 2 && millis() - buzzerTimer > BEEP_GAP) {
-        digitalWrite(PIN_BUZZER, HIGH); // Start second beep
-        beepState = 3;
-        buzzerTimer = millis();
-    }
-    // State 3: Second beep is active
-    else if (beepState == 3 && millis() - buzzerTimer > BEEP_DURATION) {
-        digitalWrite(PIN_BUZZER, LOW); // Turn off
-        beepState = 0; // Reset state machine
-    }
-}
-
 // ===== MENU LOGIC =====
 
 void updateMenuDisplay() {
@@ -156,9 +126,12 @@ void updateMenuDisplay() {
 
     const char* items[] = {
         "Start Run Mode", 
+        "Start Task",
         "IR View", 
         "Calibrate Dual", 
         "LED Test", 
+        "Rot Time",
+        "Test Spin",
         "Threshold", 
         "Base Speed", 
         "Kp", 
@@ -176,19 +149,22 @@ void updateMenuDisplay() {
         
         tft.print(items[i]);
         
-        if (i >= 4) {
+        // Only print values for items that have them
+        if (i == 1 || i == 5 || i >= 7) {
             tft.print(": ");
             switch(i) {
-                case 4: tft.println("DYNAMIC"); break;
-                case 5: tft.println(baseSpeed); break;
-                case 6: tft.println(Kp, 3); break;
-                case 7: tft.println(Ki, 4); break;
-                case 8: tft.println(Kd, 3); break;
+                case 1: tft.println(startMagnetCount); break;
+                case 5: tft.println(ROTATION_TIME); break;
+                case 7: tft.println("DYNAMIC"); break;
+                case 8: tft.println(baseSpeed); break;
+                case 9: tft.println(Kp, 3); break;
+                case 10: tft.println(Ki, 4); break;
+                case 11: tft.println(Kd, 3); break;
             }
         } else {
             tft.println();
         }
-        yield(); // Prevent watchdog triggers during heavy text rendering loops
+        yield(); 
     }
     redrawMenu = false;
 }
@@ -211,14 +187,24 @@ void processButtons() {
                     tft.setTextColor(TFT_GREEN, TFT_BLACK);
                     tft.setCursor(40, 100);
                     tft.println("Running.......");
+                    
+                    // Reset variables
                     integral = 0;
                     lastError = 0;
+                    magnetCount = startMagnetCount; // Start at the user-defined task
+                    
+                    // Pre-load Info LED based on Starting Task
+                    strip.clear();
+                    if (magnetCount == 2) strip.setPixelColor(2, strip.Color(255, 0, 0));
+                    else if (magnetCount == 3) strip.setPixelColor(2, strip.Color(0, 255, 0));
+                    else if (magnetCount >= 4) strip.setPixelColor(2, strip.Color(0, 0, 255));
+                    strip.show();
                 } 
-                else if (menuIndex == 1) {
+                else if (menuIndex == 2) {
                     currentState = STATE_IR_VIEW;
                     tft.fillScreen(TFT_BLACK);
                 }
-                else if (menuIndex == 2) {
+                else if (menuIndex == 3) {
                     currentState = STATE_CALIB_WHITE;
                     tft.fillScreen(TFT_BLACK);
                     tft.setCursor(0,0);
@@ -227,7 +213,7 @@ void processButtons() {
                     tft.println("Place on WHITE");
                     tft.println("Press START");
                 }
-                else if (menuIndex == 3) {
+                else if (menuIndex == 4) {
                     currentState = STATE_LED_TEST;
                     tft.fillScreen(TFT_BLACK);
                     tft.setTextSize(2);
@@ -237,7 +223,24 @@ void processButtons() {
                     tft.setTextColor(TFT_RED, TFT_BLACK);
                     tft.println("\n[START] to Exit");
                 }
-                else {
+                else if (menuIndex == 6) {
+                    // Test Spin Mode
+                    tft.fillScreen(TFT_BLACK);
+                    tft.setTextSize(3);
+                    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+                    tft.setCursor(10, 100);
+                    tft.println("TEST SPIN...");
+                    delay(2000);
+                    setMotor(AIN1, AIN2, PWMA, 150); 
+                    setMotor(BIN1, BIN2, PWMB, -150);
+                    delay(ROTATION_TIME);
+                    setMotor(AIN1, AIN2, PWMA, 0); 
+                    setMotor(BIN1, BIN2, PWMB, 0);
+                    
+                    redrawMenu = true;
+                }
+                else if (menuIndex == 1 || menuIndex == 5 || menuIndex >= 8) {
+                    // Only allow editing for variables that can actually be changed
                     isEditing = true; 
                     redrawMenu = true; 
                 }
@@ -250,19 +253,23 @@ void processButtons() {
             
             if (pressedUp) {
                 switch(menuIndex) {
-                    case 5: baseSpeed += 10; break;
-                    case 6: Kp += 0.01; break;
-                    case 7: Ki += 0.001; break;
-                    case 8: Kd += 0.01; break;
+                    case 1: startMagnetCount++; if(startMagnetCount > 5) startMagnetCount = 5; break;
+                    case 5: ROTATION_TIME += 10; break;
+                    case 8: baseSpeed += 10; break;
+                    case 9: Kp += 0.01; break;
+                    case 10: Ki += 0.001; break;
+                    case 11: Kd += 0.01; break;
                 }
                 redrawMenu = true;
             }
             if (pressedDown) {
                 switch(menuIndex) {
-                    case 5: baseSpeed -= 10; break;
-                    case 6: Kp -= 0.01; break;
-                    case 7: Ki -= 0.001; break;
-                    case 8: Kd -= 0.01; break;
+                    case 1: startMagnetCount--; if(startMagnetCount < 0) startMagnetCount = 0; break;
+                    case 5: ROTATION_TIME -= 10; if(ROTATION_TIME < 0) ROTATION_TIME = 0; break;
+                    case 8: baseSpeed -= 10; break;
+                    case 9: Kp -= 0.01; break;
+                    case 10: Ki -= 0.001; break;
+                    case 11: Kd -= 0.01; break;
                 }
                 redrawMenu = true;
             }
@@ -307,18 +314,18 @@ void processButtons() {
             currentState = STATE_MENU;
             setMotor(AIN1, AIN2, PWMA, 0);
             setMotor(BIN1, BIN2, PWMB, 0);
-            strip.clear(); // Turn off LEDs when exiting LED Test
+            strip.clear(); 
             strip.show();
             redrawMenu = true;
         }
     }
-    yield(); // Ensure background processing between button cycles
+    yield(); 
 }
 
 // ===== MAIN ROUTINES =====
 
 void setup() {
-    delay(2000); // 2 seconds power stabilization delay
+    delay(2000); 
     
     pinMode(BTN_START, INPUT_PULLUP);
     pinMode(BTN_UP, INPUT_PULLUP);
@@ -332,15 +339,13 @@ void setup() {
     pinMode(IR1, INPUT); pinMode(IR2, INPUT); pinMode(IR3, INPUT);
     pinMode(IR4, INPUT); pinMode(IR5, INPUT); pinMode(IR6, INPUT);
 
-    // Initialize New Hardware Pins
     pinMode(PIN_BUZZER, OUTPUT);
-    digitalWrite(PIN_BUZZER, LOW); // Ensure buzzer is off by default
-    pinMode(PIN_HALL, INPUT_PULLUP); // Use pullup for hall sensor
+    digitalWrite(PIN_BUZZER, LOW); 
+    pinMode(PIN_HALL, INPUT_PULLUP); 
 
-    // Initialize WS2812 LEDs
     strip.begin();
-    strip.show(); // Initialize all pixels to 'off'
-    strip.setBrightness(50); // Set brightness to ~20%
+    strip.show(); 
+    strip.setBrightness(50); 
 
     tft.init();
     tft.setRotation(1);
@@ -348,9 +353,6 @@ void setup() {
 }
 
 void loop() {
-    // Handle the non-blocking buzzer state machine
-    handleBuzzer();
-
     // --- 5-SECOND HARDWARE RESET CHECK ---
     if (digitalRead(BTN_START) == LOW && (currentState == STATE_MENU)) {
         if (startButtonHeldTime == 0) {
@@ -377,22 +379,17 @@ void loop() {
         if (redrawMenu) updateMenuDisplay();
     } 
     else if (currentState == STATE_LED_TEST) {
-        // Non-blocking RGB Rainbow logic
         static unsigned long lastLedUpdate = 0;
         static long firstPixelHue = 0;
         
-        if (millis() - lastLedUpdate > 10) { // Update every 10ms for smooth transition
-            // LED 0 and LED 1 cycle all colors (rainbow effect)
+        if (millis() - lastLedUpdate > 10) { 
             strip.setPixelColor(0, strip.ColorHSV(firstPixelHue));
             strip.setPixelColor(1, strip.ColorHSV(firstPixelHue));
-            
-            // LED 2 stays solid orange (Red = 255, Green = 165, Blue = 0)
-            strip.setPixelColor(2, strip.Color(255, 165, 0));
-            
+            strip.setPixelColor(2, strip.Color(255, 165, 0)); 
             strip.show();
             
-            firstPixelHue += 256; // Increment hue
-            if (firstPixelHue >= 65536) firstPixelHue = 0; // Wrap around
+            firstPixelHue += 256; 
+            if (firstPixelHue >= 65536) firstPixelHue = 0; 
             
             lastLedUpdate = millis();
         }
@@ -419,9 +416,50 @@ void loop() {
             
             lastDebugRefresh = millis();
         }
-        yield(); // Crucial yield point for high frequency display rendering states
+        yield(); 
     }
     else if (currentState == STATE_RUN) {
+        
+        // --- MAGNET SEQUENCE LOGIC ---
+        if (digitalRead(PIN_HALL) == LOW && (millis() - lastHallDetectTime > HALL_COOLDOWN)) {
+            lastHallDetectTime = millis();
+            magnetCount++;
+
+            if (magnetCount == 1) {
+                setMotor(AIN1, AIN2, PWMA, 0);
+                setMotor(BIN1, BIN2, PWMB, 0);
+                
+                for (int i = 0; i < 5; i++) {
+                    digitalWrite(PIN_BUZZER, HIGH);
+                    delay(100);
+                    digitalWrite(PIN_BUZZER, LOW);
+                    delay(900);
+                    yield(); 
+                }
+            } 
+            else if (magnetCount == 2) {
+                strip.setPixelColor(2, strip.Color(255, 0, 0)); 
+                strip.show();
+            }
+            else if (magnetCount == 3) {
+                strip.setPixelColor(2, strip.Color(0, 255, 0)); 
+                strip.show();
+            }
+            else if (magnetCount == 4) {
+                strip.setPixelColor(2, strip.Color(0, 0, 255)); 
+                strip.show();
+            }
+            else if (magnetCount == 5) {
+                setMotor(AIN1, AIN2, PWMA, 150); 
+                setMotor(BIN1, BIN2, PWMB, -150);
+                
+                delay(ROTATION_TIME); 
+                
+                setMotor(AIN1, AIN2, PWMA, 0); 
+                setMotor(BIN1, BIN2, PWMB, 0);
+            }
+        }
+
         // ---- PID Execution Block ----
         int raw[6] = {analogRead(IR1), analogRead(IR2), analogRead(IR3), 
                       analogRead(IR4), analogRead(IR5), analogRead(IR6)};
@@ -441,6 +479,17 @@ void loop() {
         bool c2 = lineDetected[3];
         bool l2 = lineDetected[4]; 
         bool l  = lineDetected[5];
+
+        // --- END ZONE LOGIC ---
+        if (magnetCount >= 5 && !l && !l2 && !c1 && !c2 && !r2 && !r) {
+            setMotor(AIN1, AIN2, PWMA, 0);
+            setMotor(BIN1, BIN2, PWMB, 0);
+            currentState = STATE_MENU;
+            strip.clear();
+            strip.show();
+            redrawMenu = true;
+            return; 
+        }
 
         float weightSum = 0; float activeSum = 0;
 
@@ -474,5 +523,5 @@ void loop() {
         setMotor(BIN1, BIN2, PWMB, leftSpeed);
     }
     delay(5);
-    yield(); // Global safety yield to feed the FreeRTOS task watchdog timer
+    yield(); 
 }
