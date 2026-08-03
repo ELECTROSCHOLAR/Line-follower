@@ -1,7 +1,9 @@
 #include <TFT_eSPI.h>
 #include <Adafruit_NeoPixel.h>
+#include <Preferences.h>
 
 TFT_eSPI tft = TFT_eSPI();
+Preferences prefs;
 
 // ===== PIN DEFINITIONS =====
 #define BTN_START 19
@@ -9,12 +11,12 @@ TFT_eSPI tft = TFT_eSPI();
 #define BTN_DOWN  5
 
 // IR Sensor Pins
-#define IR1 36
-#define IR2 39
-#define IR3 34
-#define IR4 35
-#define IR5 32
-#define IR6 33
+#define IR1 36 // R1 (Far Left)
+#define IR2 39 // R2 (Inner Left)
+#define IR3 34 // C1 (Center Front)
+#define IR4 35 // C2 (Center Back)
+#define IR5 32 // L2 (Inner Right)
+#define IR6 33 // L1 (Far Right)
 
 // Motor Driver Pins (TB6612FNG)
 #define PWMA 14
@@ -35,37 +37,33 @@ TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel strip = Adafruit_NeoPixel(NUM_LEDS, PIN_RGB, NEO_GRB + NEO_KHZ800);
 
 // ===== SYSTEM VARIABLES =====
-int baseSpeed = 150;
-float Kp = 0.5;
-float Ki = 0.0;
-float Kd = 1.0;
+int baseSpeed;
+float Kp, Ki, Kd;
 
 float lastError = 0;
 float integral = 0;
 int s1, s2, s3, s4, s5, s6;
 
 // Sequence Variables
-int startMagnetCount = 0; // Editable in menu to resume specific tasks
+int startMagnetCount; 
 int magnetCount = 0;
 unsigned long lastHallDetectTime = 0;
 const int HALL_COOLDOWN = 1500; 
-int ROTATION_TIME = 600;  // Editable in menu
+int ROTATION_TIME;
 
-// Dual Calibration Thresholds
-int whiteLevel[6] = {4095, 4095, 4095, 4095, 4095, 4095};
-int blackLevel[6] = {0, 0, 0, 0, 0, 0};
-int sensorThreshold[6] = {2000, 2000, 2000, 2000, 2000, 2000};
+// Manual Thresholds
+int manualBlackThresh;
+int manualWhiteThresh;
 
 // Menu & State Machine
-enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_CALIB_WHITE, STATE_CALIB_BLACK, STATE_LED_TEST };
+enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_LED_TEST };
 SystemState currentState = STATE_MENU;
 
 int menuIndex = 0;
-const int MENU_ITEMS = 12; 
+const int MENU_ITEMS = 11;
 bool isEditing = false;
 bool redrawMenu = true;
 
-// Calibration Sub-State Control
 unsigned long startButtonHeldTime = 0; 
 
 // ===== ROBUST DEBOUNCE LOGIC =====
@@ -112,7 +110,7 @@ void setMotor(int in1, int in2, int pwmPin, int speed) {
         digitalWrite(in2, HIGH);
         speed = -speed;
     }
-    analogWrite(pwmPin, constrain(speed, 0, 255));
+    analogWrite(pwmPin, constrain(speed, 0, 220));
 }
 
 // ===== MENU LOGIC =====
@@ -128,11 +126,10 @@ void updateMenuDisplay() {
         "Start Run Mode", 
         "Start Task",
         "IR View", 
-        "Calibrate Dual", 
-        "LED Test", 
+        "Black Thresh", 
+        "White Thresh",
         "Rot Time",
         "Test Spin",
-        "Threshold", 
         "Base Speed", 
         "Kp", 
         "Ki", 
@@ -149,17 +146,17 @@ void updateMenuDisplay() {
         
         tft.print(items[i]);
         
-        // Only print values for items that have them
-        if (i == 1 || i == 5 || i >= 7) {
+        if (i == 1 || (i >= 3 && i <= 5) || i >= 7) {
             tft.print(": ");
             switch(i) {
                 case 1: tft.println(startMagnetCount); break;
+                case 3: tft.println(manualBlackThresh); break;
+                case 4: tft.println(manualWhiteThresh); break;
                 case 5: tft.println(ROTATION_TIME); break;
-                case 7: tft.println("DYNAMIC"); break;
-                case 8: tft.println(baseSpeed); break;
-                case 9: tft.println(Kp, 3); break;
-                case 10: tft.println(Ki, 4); break;
-                case 11: tft.println(Kd, 3); break;
+                case 7: tft.println(baseSpeed); break;
+                case 8: tft.println(Kp, 3); break;
+                case 9: tft.println(Ki, 4); break;
+                case 10: tft.println(Kd, 3); break;
             }
         } else {
             tft.println();
@@ -188,12 +185,10 @@ void processButtons() {
                     tft.setCursor(40, 100);
                     tft.println("Running.......");
                     
-                    // Reset variables
                     integral = 0;
                     lastError = 0;
-                    magnetCount = startMagnetCount; // Start at the user-defined task
+                    magnetCount = startMagnetCount; 
                     
-                    // Pre-load Info LED based on Starting Task
                     strip.clear();
                     if (magnetCount == 2) strip.setPixelColor(2, strip.Color(255, 0, 0));
                     else if (magnetCount == 3) strip.setPixelColor(2, strip.Color(0, 255, 0));
@@ -204,27 +199,7 @@ void processButtons() {
                     currentState = STATE_IR_VIEW;
                     tft.fillScreen(TFT_BLACK);
                 }
-                else if (menuIndex == 3) {
-                    currentState = STATE_CALIB_WHITE;
-                    tft.fillScreen(TFT_BLACK);
-                    tft.setCursor(0,0);
-                    tft.setTextColor(TFT_WHITE, TFT_BLACK);
-                    tft.println("STEP 1: WHITE");
-                    tft.println("Place on WHITE");
-                    tft.println("Press START");
-                }
-                else if (menuIndex == 4) {
-                    currentState = STATE_LED_TEST;
-                    tft.fillScreen(TFT_BLACK);
-                    tft.setTextSize(2);
-                    tft.setCursor(0, 0);
-                    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-                    tft.println("-- LED TEST MODE --");
-                    tft.setTextColor(TFT_RED, TFT_BLACK);
-                    tft.println("\n[START] to Exit");
-                }
                 else if (menuIndex == 6) {
-                    // Test Spin Mode
                     tft.fillScreen(TFT_BLACK);
                     tft.setTextSize(3);
                     tft.setTextColor(TFT_CYAN, TFT_BLACK);
@@ -236,11 +211,9 @@ void processButtons() {
                     delay(ROTATION_TIME);
                     setMotor(AIN1, AIN2, PWMA, 0); 
                     setMotor(BIN1, BIN2, PWMB, 0);
-                    
                     redrawMenu = true;
                 }
-                else if (menuIndex == 1 || menuIndex == 5 || menuIndex >= 8) {
-                    // Only allow editing for variables that can actually be changed
+                else if (menuIndex == 1 || (menuIndex >= 3 && menuIndex <= 5) || menuIndex >= 7) {
                     isEditing = true; 
                     redrawMenu = true; 
                 }
@@ -248,68 +221,48 @@ void processButtons() {
         } else {
             if (pressedStart) { 
                 isEditing = false; 
+                switch(menuIndex) {
+                    case 1: prefs.putInt("startMag", startMagnetCount); break;
+                    case 3: prefs.putInt("blkThresh", manualBlackThresh); break;
+                    case 4: prefs.putInt("whtThresh", manualWhiteThresh); break;
+                    case 5: prefs.putInt("rotTime", ROTATION_TIME); break;
+                    case 7: prefs.putInt("baseSpeed", baseSpeed); break;
+                    case 8: prefs.putFloat("Kp", Kp); break;
+                    case 9: prefs.putFloat("Ki", Ki); break;
+                    case 10: prefs.putFloat("Kd", Kd); break;
+                }
                 redrawMenu = true; 
             }
             
             if (pressedUp) {
                 switch(menuIndex) {
                     case 1: startMagnetCount++; if(startMagnetCount > 5) startMagnetCount = 5; break;
+                    case 3: manualBlackThresh += 50; if(manualBlackThresh > 4095) manualBlackThresh = 4095; break;
+                    case 4: manualWhiteThresh += 50; if(manualWhiteThresh > 4095) manualWhiteThresh = 4095; break;
                     case 5: ROTATION_TIME += 10; break;
-                    case 8: baseSpeed += 10; break;
-                    case 9: Kp += 0.01; break;
-                    case 10: Ki += 0.001; break;
-                    case 11: Kd += 0.01; break;
+                    case 7: baseSpeed += 10; break;
+                    case 8: Kp += 0.01; break;
+                    case 9: Ki += 0.001; break;
+                    case 10: Kd += 0.01; break;
                 }
                 redrawMenu = true;
             }
             if (pressedDown) {
                 switch(menuIndex) {
                     case 1: startMagnetCount--; if(startMagnetCount < 0) startMagnetCount = 0; break;
+                    case 3: manualBlackThresh -= 50; if(manualBlackThresh < 0) manualBlackThresh = 0; break;
+                    case 4: manualWhiteThresh -= 50; if(manualWhiteThresh < 0) manualWhiteThresh = 0; break;
                     case 5: ROTATION_TIME -= 10; if(ROTATION_TIME < 0) ROTATION_TIME = 0; break;
-                    case 8: baseSpeed -= 10; break;
-                    case 9: Kp -= 0.01; break;
-                    case 10: Ki -= 0.001; break;
-                    case 11: Kd -= 0.01; break;
+                    case 7: baseSpeed -= 10; break;
+                    case 8: Kp -= 0.01; break;
+                    case 9: Ki -= 0.001; break;
+                    case 10: Kd -= 0.01; break;
                 }
                 redrawMenu = true;
             }
         }
     } 
-    else if (currentState == STATE_CALIB_WHITE) {
-        if (pressedStart) {
-            whiteLevel[0] = analogRead(IR1); whiteLevel[1] = analogRead(IR2); whiteLevel[2] = analogRead(IR3);
-            whiteLevel[3] = analogRead(IR4); whiteLevel[4] = analogRead(IR5); whiteLevel[5] = analogRead(IR6);
-
-            currentState = STATE_CALIB_BLACK;
-            tft.fillScreen(TFT_BLACK);
-            tft.setCursor(0,0);
-            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-            tft.println("STEP 2: BLACK");
-            tft.println("Place on BLACK");
-            tft.println("Press START");
-        }
-    }
-    else if (currentState == STATE_CALIB_BLACK) {
-        if (pressedStart) {
-            blackLevel[0] = analogRead(IR1); blackLevel[1] = analogRead(IR2); blackLevel[2] = analogRead(IR3);
-            blackLevel[3] = analogRead(IR4); blackLevel[4] = analogRead(IR5); blackLevel[5] = analogRead(IR6);
-
-            for(int i = 0; i < 6; i++) {
-                sensorThreshold[i] = (whiteLevel[i] + blackLevel[i]) / 2;
-            }
-
-            tft.fillScreen(TFT_BLACK);
-            tft.setCursor(0,0);
-            tft.setTextColor(TFT_GREEN, TFT_BLACK);
-            tft.println("CALIB SUCCESS!");
-            delay(1500);
-
-            currentState = STATE_MENU;
-            redrawMenu = true;
-        }
-    }
     else {
-        // Exit from RUN, IR_VIEW, or LED_TEST modes
         if (pressedStart) {
             currentState = STATE_MENU;
             setMotor(AIN1, AIN2, PWMA, 0);
@@ -326,6 +279,18 @@ void processButtons() {
 
 void setup() {
     delay(2000); 
+    
+    prefs.begin("robot", false);
+    startMagnetCount = prefs.getInt("startMag", 0);
+    manualBlackThresh = prefs.getInt("blkThresh", 3000);
+    manualWhiteThresh = prefs.getInt("whtThresh", 1000);
+    ROTATION_TIME = prefs.getInt("rotTime", 600);
+    
+    // Calibrated defaults for 7.4V battery with N20 motors
+    baseSpeed = prefs.getInt("baseSpeed", 130);
+    Kp = prefs.getFloat("Kp", 0.45);
+    Ki = prefs.getFloat("Ki", 0.00);
+    Kd = prefs.getFloat("Kd", 0.25);
     
     pinMode(BTN_START, INPUT_PULLUP);
     pinMode(BTN_UP, INPUT_PULLUP);
@@ -353,7 +318,6 @@ void setup() {
 }
 
 void loop() {
-    // --- 5-SECOND HARDWARE RESET CHECK ---
     if (digitalRead(BTN_START) == LOW && (currentState == STATE_MENU)) {
         if (startButtonHeldTime == 0) {
             startButtonHeldTime = millis();
@@ -378,23 +342,6 @@ void loop() {
     if (currentState == STATE_MENU) {
         if (redrawMenu) updateMenuDisplay();
     } 
-    else if (currentState == STATE_LED_TEST) {
-        static unsigned long lastLedUpdate = 0;
-        static long firstPixelHue = 0;
-        
-        if (millis() - lastLedUpdate > 10) { 
-            strip.setPixelColor(0, strip.ColorHSV(firstPixelHue));
-            strip.setPixelColor(1, strip.ColorHSV(firstPixelHue));
-            strip.setPixelColor(2, strip.Color(255, 165, 0)); 
-            strip.show();
-            
-            firstPixelHue += 256; 
-            if (firstPixelHue >= 65536) firstPixelHue = 0; 
-            
-            lastLedUpdate = millis();
-        }
-        yield();
-    }
     else if (currentState == STATE_IR_VIEW) {
         static unsigned long lastDebugRefresh = 0;
         if (millis() - lastDebugRefresh > 300) {
@@ -452,36 +399,43 @@ void loop() {
             else if (magnetCount == 5) {
                 setMotor(AIN1, AIN2, PWMA, 150); 
                 setMotor(BIN1, BIN2, PWMB, -150);
-                
                 delay(ROTATION_TIME); 
-                
                 setMotor(AIN1, AIN2, PWMA, 0); 
                 setMotor(BIN1, BIN2, PWMB, 0);
             }
         }
 
-        // ---- PID Execution Block ----
+        // ---- DYNAMIC LINE DETECTION BLOCK ----
         int raw[6] = {analogRead(IR1), analogRead(IR2), analogRead(IR3), 
                       analogRead(IR4), analogRead(IR5), analogRead(IR6)};
 
+        int outerBlackCount = 0;
+        if (raw[0] > manualBlackThresh) outerBlackCount++;
+        if (raw[1] > manualBlackThresh) outerBlackCount++;
+        if (raw[4] > manualBlackThresh) outerBlackCount++;
+        if (raw[5] > manualBlackThresh) outerBlackCount++;
+
+        bool whiteLineOnBlackBg = (outerBlackCount >= 3);
+
         bool lineDetected[6];
         for(int i = 0; i < 6; i++) {
-            if (whiteLevel[i] > blackLevel[i]) {
-                lineDetected[i] = (raw[i] < sensorThreshold[i]); 
+            if (whiteLineOnBlackBg) {
+                lineDetected[i] = (raw[i] < manualWhiteThresh);
             } else {
-                lineDetected[i] = (raw[i] > sensorThreshold[i]); 
+                lineDetected[i] = (raw[i] > manualBlackThresh);
             }
         }
 
-        bool r  = lineDetected[0]; 
-        bool r2 = lineDetected[1];
-        bool c1 = lineDetected[2]; 
-        bool c2 = lineDetected[3];
-        bool l2 = lineDetected[4]; 
-        bool l  = lineDetected[5];
+        // PHYSICAL MAPPING: Left-to-Right
+        bool r1_farLeft    = lineDetected[0]; // IR1 (Far Left, x = -22.5mm)
+        bool r2_innerLeft  = lineDetected[1]; // IR2 (Inner Left, x = -12.5mm)
+        bool c1_centerFwd  = lineDetected[2]; // IR3 (Center Front)
+        bool c2_centerBack = lineDetected[3]; // IR4 (Center Back)
+        bool l2_innerRight = lineDetected[4]; // IR5 (Inner Right, x = +12.5mm)
+        bool l1_farRight   = lineDetected[5]; // IR6 (Far Right, x = +22.5mm)
 
         // --- END ZONE LOGIC ---
-        if (magnetCount >= 5 && !l && !l2 && !c1 && !c2 && !r2 && !r) {
+        if (magnetCount >= 5 && !r1_farLeft && !r2_innerLeft && !c1_centerFwd && !c2_centerBack && !l2_innerRight && !l1_farRight) {
             setMotor(AIN1, AIN2, PWMA, 0);
             setMotor(BIN1, BIN2, PWMB, 0);
             currentState = STATE_MENU;
@@ -491,33 +445,51 @@ void loop() {
             return; 
         }
 
-        float weightSum = 0; float activeSum = 0;
-
-        if (l)  { weightSum += -3; activeSum += 1; }
-        if (l2) { weightSum += -2; activeSum += 1; }
-        if (c1) { weightSum += 0;  activeSum += 1; }
-        if (c2) { weightSum += 0;  activeSum += 1; }
-        if (r2) { weightSum += 2;  activeSum += 1; }
-        if (r)  { weightSum += 3;  activeSum += 1; }
-
-        float error;
-        if (activeSum > 0) {
-            error = weightSum / activeSum;
-        } else {
-            error = (lastError > 0) ? 3.0 : -3.0;
+        // ---- GEOMETRY-CALIBRATED ERROR LOGIC ----
+        float error = 0.0;
+        
+        // 1. Dead Center Tracking
+        if ((c1_centerFwd || c2_centerBack) && (!r1_farLeft && !l1_farRight)) {
+            if (r2_innerLeft && !l2_innerRight)       error = -0.4; 
+            else if (!r2_innerLeft && l2_innerRight)  error = 0.4;  
+            else                                      error = 0.0;  
+        }
+        // 2. Mild Curves
+        else if (r2_innerLeft && !l1_farRight) {
+            error = -1.2; 
+        }
+        else if (l2_innerRight && !r1_farLeft) {
+            error = 1.2;  
+        }
+        // 3. Sharp 90-Degree Turns
+        else if (r1_farLeft) {
+            error = -2.8; 
+        }
+        else if (l1_farRight) {
+            error = 2.8;  
+        }
+        // 4. Line Lost Recovery
+        else {
+            if (lastError > 0.5)        error = 2.0;  
+            else if (lastError < -0.5)  error = -2.0; 
+            else                        error = 0.0;  
         }
 
+        // --- PID CALCULATION ---
         integral += error;
-        integral = constrain(integral, -1000, 1000);
+        integral = constrain(integral, -300, 300);
         float derivative = error - lastError;
+        
         float output = (Kp * error) + (Ki * integral) + (Kd * derivative);
         lastError = error;
 
-        int leftSpeed  = baseSpeed + output * 100;
-        int rightSpeed = baseSpeed - output * 100;
+        // --- MOTOR SPEED CALCULATION (Scaled for 7.4V Battery) ---
+        int leftSpeed  = baseSpeed + (output * 30);
+        int rightSpeed = baseSpeed - (output * 30);
 
-        leftSpeed  = constrain(leftSpeed, 0, 205);
-        rightSpeed = constrain(rightSpeed, 0, 205);
+        // Constrained between -120 (active pivot reverse) and 220 max PWM limit
+        leftSpeed  = constrain(leftSpeed, -120, 220);
+        rightSpeed = constrain(rightSpeed, -120, 220);
 
         setMotor(AIN1, AIN2, PWMA, rightSpeed);
         setMotor(BIN1, BIN2, PWMB, leftSpeed);
