@@ -48,27 +48,29 @@ int s1, s2, s3, s4, s5, s6;
 int startMagnetCount; 
 int magnetCount = 0;
 unsigned long lastHallDetectTime = 0;
-const int HALL_COOLDOWN = 1500; 
+
+// MODIFIED: 1-second (1000ms) cooldown delay between detecting consecutive magnets
+const int HALL_COOLDOWN = 1000; 
 int ROTATION_TIME;
 
 // Manual Thresholds
 int manualBlackThresh;
 int manualWhiteThresh;
 
-// Line Logic Tracking
-bool whiteLineOnBlackBg = false; 
+// Manual Line Logic Selection (0 = Black Line on White, 1 = White Line on Black)
+int selectedLineLogic = 0; 
 
 // Menu & State Machine
 enum SystemState { STATE_MENU, STATE_RUN, STATE_IR_VIEW, STATE_LED_TEST, STATE_MAG_TEST };
 SystemState currentState = STATE_MENU;
 
 int menuIndex = 0;
-const int MENU_ITEMS = 13; // Increased for Mag Test
+const int MENU_ITEMS = 14; 
 bool isEditing = false;
 bool redrawMenu = true;
 
 unsigned long startButtonHeldTime = 0; 
-int lastDisplayedMode = -1; // Track displayed logic (0 = Black, 1 = White)
+int lastDisplayedMode = -1; 
 
 // ===== ROBUST DEBOUNCE LOGIC =====
 struct Button {
@@ -132,10 +134,11 @@ void updateMenuDisplay() {
         "IR View", 
         "Black Thresh", 
         "White Thresh",
+        "Line Color",     
         "Rot Time",
         "Test Spin",
         "LED Test",       
-        "Test Magnet",    // New Option
+        "Test Magnet",    
         "Base Speed", 
         "Kp", 
         "Ki", 
@@ -152,17 +155,18 @@ void updateMenuDisplay() {
         
         tft.print(items[i]);
         
-        if (i == 1 || (i >= 3 && i <= 5) || i >= 9) {
+        if (i == 1 || (i >= 3 && i <= 6) || i >= 10) {
             tft.print(": ");
             switch(i) {
                 case 1: tft.println(startMagnetCount); break;
                 case 3: tft.println(manualBlackThresh); break;
                 case 4: tft.println(manualWhiteThresh); break;
-                case 5: tft.println(ROTATION_TIME); break;
-                case 9: tft.println(baseSpeed); break;
-                case 10: tft.println(Kp, 3); break;
-                case 11: tft.println(Ki, 4); break;
-                case 12: tft.println(Kd, 3); break;
+                case 5: tft.println(selectedLineLogic == 0 ? "Black" : "White"); break;
+                case 6: tft.println(ROTATION_TIME); break;
+                case 10: tft.println(baseSpeed); break;
+                case 11: tft.println(Kp, 3); break;
+                case 12: tft.println(Ki, 4); break;
+                case 13: tft.println(Kd, 3); break;
             }
         } else {
             tft.println();
@@ -190,8 +194,7 @@ void processButtons() {
                     integral = 0;
                     lastError = 0;
                     magnetCount = startMagnetCount; 
-                    lastDisplayedMode = -1; // Reset screen state tracker
-                    whiteLineOnBlackBg = false; // Default baseline on start
+                    lastDisplayedMode = -1; 
                     
                     strip.clear();
                     if (magnetCount == 2) strip.setPixelColor(2, strip.Color(255, 0, 0));
@@ -203,7 +206,7 @@ void processButtons() {
                     currentState = STATE_IR_VIEW;
                     tft.fillScreen(TFT_BLACK);
                 }
-                else if (menuIndex == 6) {
+                else if (menuIndex == 7) {
                     tft.fillScreen(TFT_BLACK);
                     tft.setTextSize(3);
                     tft.setTextColor(TFT_CYAN, TFT_BLACK);
@@ -217,15 +220,22 @@ void processButtons() {
                     setMotor(BIN1, BIN2, PWMB, 0);
                     redrawMenu = true;
                 }
-                else if (menuIndex == 7) { 
+                else if (menuIndex == 8) { 
                     currentState = STATE_LED_TEST;
                     tft.fillScreen(TFT_BLACK);
+                    
+                    tft.setTextSize(2);
+                    tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
+                    tft.setCursor(10, 40);
+                    tft.println("-- LED TEST --\n");
+                    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+                    tft.println("[START] to Exit");
                 }
-                else if (menuIndex == 8) { // New Magnet Test Trigger
+                else if (menuIndex == 9) { 
                     currentState = STATE_MAG_TEST;
                     tft.fillScreen(TFT_BLACK);
                 }
-                else if (menuIndex == 1 || (menuIndex >= 3 && menuIndex <= 5) || menuIndex >= 9) {
+                else if (menuIndex == 1 || (menuIndex >= 3 && menuIndex <= 6) || menuIndex >= 10) {
                     isEditing = true; 
                     redrawMenu = true; 
                 }
@@ -237,11 +247,12 @@ void processButtons() {
                     case 1: prefs.putInt("startMag", startMagnetCount); break;
                     case 3: prefs.putInt("blkThresh", manualBlackThresh); break;
                     case 4: prefs.putInt("whtThresh", manualWhiteThresh); break;
-                    case 5: prefs.putInt("rotTime", ROTATION_TIME); break;
-                    case 9: prefs.putInt("baseSpeed", baseSpeed); break;
-                    case 10: prefs.putFloat("Kp", Kp); break;
-                    case 11: prefs.putFloat("Ki", Ki); break;
-                    case 12: prefs.putFloat("Kd", Kd); break;
+                    case 5: prefs.putInt("lineLogic", selectedLineLogic); break;
+                    case 6: prefs.putInt("rotTime", ROTATION_TIME); break;
+                    case 10: prefs.putInt("baseSpeed", baseSpeed); break;
+                    case 11: prefs.putFloat("Kp", Kp); break;
+                    case 12: prefs.putFloat("Ki", Ki); break;
+                    case 13: prefs.putFloat("Kd", Kd); break;
                 }
                 redrawMenu = true; 
             }
@@ -251,11 +262,12 @@ void processButtons() {
                     case 1: startMagnetCount++; if(startMagnetCount > 5) startMagnetCount = 5; break;
                     case 3: manualBlackThresh += 50; if(manualBlackThresh > 4095) manualBlackThresh = 4095; break;
                     case 4: manualWhiteThresh += 50; if(manualWhiteThresh > 4095) manualWhiteThresh = 4095; break;
-                    case 5: ROTATION_TIME += 10; break;
-                    case 9: baseSpeed += 10; break;
-                    case 10: Kp += 0.01; break;
-                    case 11: Ki += 0.001; break;
-                    case 12: Kd += 0.01; break;
+                    case 5: selectedLineLogic = (selectedLineLogic + 1) % 2; break;
+                    case 6: ROTATION_TIME += 10; break;
+                    case 10: baseSpeed += 10; break;
+                    case 11: Kp += 0.01; break;
+                    case 12: Ki += 0.001; break;
+                    case 13: Kd += 0.01; break;
                 }
                 redrawMenu = true;
             }
@@ -264,23 +276,23 @@ void processButtons() {
                     case 1: startMagnetCount--; if(startMagnetCount < 0) startMagnetCount = 0; break;
                     case 3: manualBlackThresh -= 50; if(manualBlackThresh < 0) manualBlackThresh = 0; break;
                     case 4: manualWhiteThresh -= 50; if(manualWhiteThresh < 0) manualWhiteThresh = 0; break;
-                    case 5: ROTATION_TIME -= 10; if(ROTATION_TIME < 0) ROTATION_TIME = 0; break;
-                    case 9: baseSpeed -= 10; break;
-                    case 10: Kp -= 0.01; break;
-                    case 11: Ki -= 0.001; break;
-                    case 12: Kd -= 0.01; break;
+                    case 5: selectedLineLogic = (selectedLineLogic + 1) % 2; break;
+                    case 6: ROTATION_TIME -= 10; if(ROTATION_TIME < 0) ROTATION_TIME = 0; break;
+                    case 10: baseSpeed -= 10; break;
+                    case 11: Kp -= 0.01; break;
+                    case 12: Ki -= 0.001; break;
+                    case 13: Kd -= 0.01; break;
                 }
                 redrawMenu = true;
             }
         }
     } 
     else {
-        // Exit any sub-state
         if (pressedStart) {
             currentState = STATE_MENU;
             setMotor(AIN1, AIN2, PWMA, 0);
             setMotor(BIN1, BIN2, PWMB, 0);
-            digitalWrite(PIN_BUZZER, LOW); // Stop buzzer if it was running
+            digitalWrite(PIN_BUZZER, LOW); 
             strip.clear(); 
             strip.show();
             redrawMenu = true;
@@ -296,14 +308,15 @@ void setup() {
     
     prefs.begin("robot", false);
     startMagnetCount = prefs.getInt("startMag", 0);
-    manualBlackThresh = prefs.getInt("blkThresh", 3000);
-    manualWhiteThresh = prefs.getInt("whtThresh", 1000);
+    manualBlackThresh = prefs.getInt("blkThresh", 1500);
+    manualWhiteThresh = prefs.getInt("whtThresh", 1500);
+    selectedLineLogic = prefs.getInt("lineLogic", 0);
     ROTATION_TIME = prefs.getInt("rotTime", 600);
     
-    baseSpeed = prefs.getInt("baseSpeed", 130);
-    Kp = prefs.getFloat("Kp", 0.45);
+    baseSpeed = prefs.getInt("baseSpeed", 80); 
+    Kp = prefs.getFloat("Kp", 0.75);
     Ki = prefs.getFloat("Ki", 0.00);
-    Kd = prefs.getFloat("Kd", 0.25);
+    Kd = prefs.getFloat("Kd", 0.60); 
     
     pinMode(BTN_START, INPUT_PULLUP);
     pinMode(BTN_UP, INPUT_PULLUP);
@@ -378,7 +391,7 @@ void loop() {
         }
         yield(); 
     }
-    else if (currentState == STATE_MAG_TEST) { // NEW: MAGNET TEST
+    else if (currentState == STATE_MAG_TEST) { 
         static unsigned long lastMagRefresh = 0;
         if (millis() - lastMagRefresh > 150) {
             bool magDetected = (digitalRead(PIN_HALL) == LOW);
@@ -393,7 +406,7 @@ void loop() {
             if (magDetected) {
                 tft.setTextColor(TFT_GREEN, TFT_BLACK);
                 tft.println("DETECTED!   ");
-                digitalWrite(PIN_BUZZER, HIGH); // Sound buzzer
+                digitalWrite(PIN_BUZZER, HIGH); 
                 strip.setPixelColor(0, strip.Color(0, 255, 0)); 
                 strip.setPixelColor(1, strip.Color(0, 255, 0));
                 strip.setPixelColor(2, strip.Color(0, 255, 0));
@@ -416,38 +429,17 @@ void loop() {
     }
     else if (currentState == STATE_LED_TEST) { 
         static unsigned long lastLedStep = 0;
-        static int ledStep = 0;
+        static uint16_t pixelHue = 0; 
 
-        if (millis() - lastLedStep > 500) {
-            tft.setTextSize(2);
-            tft.setCursor(10, 40);
-            tft.setTextColor(TFT_MAGENTA, TFT_BLACK);
-            tft.println("-- WS2812 LED TEST --\n");
-            
+        if (millis() - lastLedStep > 15) { 
             strip.clear();
-            if (ledStep == 0) {
-                tft.setTextColor(TFT_RED, TFT_BLACK);
-                tft.println("COLOR: RED    ");
-                for(int i=0; i<NUM_LEDS; i++) strip.setPixelColor(i, strip.Color(255, 0, 0));
-            } else if (ledStep == 1) {
-                tft.setTextColor(TFT_GREEN, TFT_BLACK);
-                tft.println("COLOR: GREEN  ");
-                for(int i=0; i<NUM_LEDS; i++) strip.setPixelColor(i, strip.Color(0, 255, 0));
-            } else if (ledStep == 2) {
-                tft.setTextColor(TFT_BLUE, TFT_BLACK);
-                tft.println("COLOR: BLUE   ");
-                for(int i=0; i<NUM_LEDS; i++) strip.setPixelColor(i, strip.Color(0, 0, 255));
-            } else if (ledStep == 3) {
-                tft.setTextColor(TFT_WHITE, TFT_BLACK);
-                tft.println("COLOR: WHITE  ");
-                for(int i=0; i<NUM_LEDS; i++) strip.setPixelColor(i, strip.Color(255, 255, 255));
-            }
+            
+            strip.setPixelColor(0, strip.gamma32(strip.ColorHSV(pixelHue)));
+            strip.setPixelColor(1, strip.gamma32(strip.ColorHSV(pixelHue + 10000)));
+            strip.setPixelColor(2, strip.Color(255, 165, 0));
+
             strip.show();
-
-            tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-            tft.println("\n[START] to Exit");
-
-            ledStep = (ledStep + 1) % 4;
+            pixelHue += 300; 
             lastLedStep = millis();
         }
         yield();
@@ -476,6 +468,13 @@ void loop() {
                 strip.show();
             }
             else if (magnetCount == 3) {
+                // INVERSION OF CURRENT LOGIC AFTER 3RD TASK/MAGNET
+                selectedLineLogic = (selectedLineLogic == 0) ? 1 : 0;
+                
+                digitalWrite(PIN_BUZZER, HIGH);
+                delay(300);
+                digitalWrite(PIN_BUZZER, LOW);
+
                 strip.setPixelColor(2, strip.Color(0, 255, 0)); 
                 strip.show();
             }
@@ -489,30 +488,15 @@ void loop() {
                 delay(ROTATION_TIME); 
                 setMotor(AIN1, AIN2, PWMA, 0); 
                 setMotor(BIN1, BIN2, PWMB, 0);
+                // Will immediately resume line tracking on next loop evaluation!
             }
         }
 
-        // ---- NEW DYNAMIC LINE DETECTION BLOCK ----
         int raw[6] = {analogRead(IR1), analogRead(IR2), analogRead(IR3), 
                       analogRead(IR4), analogRead(IR5), analogRead(IR6)};
 
-        bool farLeftIsBlack  = (raw[0] > manualBlackThresh);
-        bool farRightIsBlack = (raw[5] > manualBlackThresh);
-        bool farLeftIsWhite  = (raw[0] < manualWhiteThresh);
-        bool farRightIsWhite = (raw[5] < manualWhiteThresh);
-
-        // State update based on outermost sensors
-        if (farLeftIsBlack && farRightIsBlack) {
-            whiteLineOnBlackBg = true;  // Track White line logic
-        } 
-        else if (farLeftIsWhite && farRightIsWhite) {
-            whiteLineOnBlackBg = false; // Track Black line logic
-        }
-        // Else: If they are mixed (e.g. crossing a line or corner), keep the last known logic (do nothing).
-
-        // --- TFT DISPLAY OF ACTIVE LINE LOGIC ---
-        int currentMode = whiteLineOnBlackBg ? 1 : 0;
-        if (currentMode != lastDisplayedMode) {
+        // Update display text dynamically if logic flips or starts
+        if (selectedLineLogic != lastDisplayedMode) {
             tft.fillScreen(TFT_BLACK);
             tft.setTextSize(2);
             tft.setCursor(10, 80);
@@ -521,35 +505,53 @@ void loop() {
             
             tft.setTextSize(2);
             tft.setCursor(10, 130);
-            if (whiteLineOnBlackBg) {
+            if (selectedLineLogic == 1) {
                 tft.setTextColor(TFT_WHITE, TFT_BLACK);
-                tft.println("MODE: WHITE LOGIC");
+                tft.println("MODE: WHITE ON BLACK");
             } else {
                 tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-                tft.println("MODE: BLACK LOGIC");
+                tft.println("MODE: BLACK ON WHITE");
             }
-            lastDisplayedMode = currentMode;
+            lastDisplayedMode = selectedLineLogic;
         }
 
-        bool lineDetected[6];
+        // --- CONTINUOUS WEIGHTED AVERAGE POSITION CALCULATION ---
+        long weightedSum = 0;
+        long totalSum = 0;
+        bool anyLineDetected = false;
+
         for(int i = 0; i < 6; i++) {
-            if (whiteLineOnBlackBg) {
-                lineDetected[i] = (raw[i] < manualWhiteThresh);
+            int evaluatedVal = 0;
+            if (selectedLineLogic == 1) {
+                // White Line on Black Background logic: active when sensor reads low (white)
+                if (raw[i] < manualWhiteThresh) evaluatedVal = 4095; 
             } else {
-                lineDetected[i] = (raw[i] > manualBlackThresh);
+                // Black Line on White Background logic: active when sensor reads high (black)
+                if (raw[i] > manualBlackThresh) evaluatedVal = 4095;
             }
+
+            if (evaluatedVal > 0) {
+                anyLineDetected = true;
+            }
+
+            int weight = (i - 2.5) * 1000; 
+            
+            weightedSum += (long)evaluatedVal * weight;
+            totalSum += evaluatedVal;
         }
 
-        // PHYSICAL MAPPING: Left-to-Right
-        bool l1_farLeft    = lineDetected[0]; // IR1 (Far Left)
-        bool l2_innerLeft  = lineDetected[1]; // IR2 (Inner Left)
-        bool c1_centerFwd  = lineDetected[2]; // IR3 (Center Front)
-        bool c2_centerBack = lineDetected[3]; // IR4 (Center Back)
-        bool r2_innerRight = lineDetected[4]; // IR5 (Inner Right)
-        bool r1_farRight   = lineDetected[5]; // IR6 (Far Right)
+        // --- 90 DEGREE TURN HANDLING ---
+        bool l1_farLeft    = (selectedLineLogic == 1 ? raw[0] < manualWhiteThresh : raw[0] > manualBlackThresh);
+        bool r1_farRight   = (selectedLineLogic == 1 ? raw[5] < manualWhiteThresh : raw[5] > manualBlackThresh);
 
-        // --- END ZONE LOGIC ---
-        if (magnetCount >= 5 && !l1_farLeft && !l2_innerLeft && !c1_centerFwd && !c2_centerBack && !r2_innerRight && !r1_farRight) {
+        // --- MODIFIED: END ZONE WHITE BOX CHECK ---
+        // A white box means ALL sensors read a value < manualWhiteThresh
+        bool allWhiteBox = (raw[0] < manualWhiteThresh && raw[1] < manualWhiteThresh && 
+                            raw[2] < manualWhiteThresh && raw[3] < manualWhiteThresh && 
+                            raw[4] < manualWhiteThresh && raw[5] < manualWhiteThresh);
+
+        // Stop condition ONLY triggers if past the 5th magnet AND fully inside the white box
+        if (magnetCount >= 5 && allWhiteBox) {
             setMotor(AIN1, AIN2, PWMA, 0);
             setMotor(BIN1, BIN2, PWMB, 0);
             currentState = STATE_MENU;
@@ -559,34 +561,20 @@ void loop() {
             return; 
         }
 
-        // ---- GEOMETRY-CALIBRATED ERROR LOGIC ----
         float error = 0.0;
-        
-        // 1. Dead Center Tracking
-        if ((c1_centerFwd || c2_centerBack) && (!l1_farLeft && !r1_farRight)) {
-            if (l2_innerLeft && !r2_innerRight)       error = -0.4; // Drifting Right, turn Left
-            else if (!l2_innerLeft && r2_innerRight)  error = 0.4;  // Drifting Left, turn Right
-            else                                      error = 0.0;  // Dead center
-        }
-        // 2. Mild Curves
-        else if (l2_innerLeft && !r1_farRight) {
-            error = -1.2; // Turn Left
-        }
-        else if (r2_innerRight && !l1_farLeft) {
-            error = 1.2;  // Turn Right
-        }
-        // 3. Sharp 90-Degree Turns
-        else if (l1_farLeft) {
-            error = -2.8; // Hard Left
-        }
-        else if (r1_farRight) {
-            error = 2.8;  // Hard Right
-        }
-        // 4. Line Lost Recovery
-        else {
-            if (lastError < -0.5)       error = -2.0; // Keep turning Left
-            else if (lastError > 0.5)   error = 2.0;  // Keep turning Right
-            else                        error = 0.0;  
+
+        if (anyLineDetected) {
+            float position = (float)weightedSum / totalSum; 
+            error = position / 1000.0; 
+        } else {
+            // Precise handling when 90-degree corners cause total line loss temporarily
+            if (l1_farLeft && !r1_farRight)      error = -3.5; // Hard sharp left turn catch
+            else if (r1_farRight && !l1_farLeft) error = 3.5;  // Hard sharp right turn catch
+            else {
+                if (lastError < 0)      error = -3.0; 
+                else if (lastError > 0) error = 3.0; 
+                else                    error = 0.0;
+            }
         }
 
         // --- PID CALCULATION ---
@@ -597,17 +585,26 @@ void loop() {
         float output = (Kp * error) + (Ki * integral) + (Kd * derivative);
         lastError = error;
 
-        // --- OPPOSITE DIRECTION MOTOR SPEED CALCULATION ---
-        int leftSpeed  = baseSpeed - (output * 30);
-        int rightSpeed = baseSpeed + (output * 30);
+        // --- MODIFIED: DYNAMIC MOTOR SPEED (RAMP BOOST) ---
+        int currentBaseSpeed = baseSpeed;
+        int maxLimit = 180; // Standard maximum constraint
+        
+        // If we are between magnet 3 and magnet 4 (the 25-degree ramp area)
+        // push the robot to near-maximum speed.
+        if (magnetCount == 3) {
+            currentBaseSpeed = 200; // Drastically boosted base speed
+            maxLimit = 220;         // Allow motors to use the full top-end PWM range
+        }
 
-        // Constrained between -120 (active pivot reverse) and 220 max PWM
-        leftSpeed  = constrain(leftSpeed, -120, 220);
-        rightSpeed = constrain(rightSpeed, -120, 220);
+        int leftSpeed  = currentBaseSpeed - (output * 35);
+        int rightSpeed = currentBaseSpeed + (output * 35);
+
+        leftSpeed  = constrain(leftSpeed, -120, maxLimit);
+        rightSpeed = constrain(rightSpeed, -120, maxLimit);
 
         setMotor(AIN1, AIN2, PWMA, rightSpeed);
         setMotor(BIN1, BIN2, PWMB, leftSpeed);
     }
-    delay(5);
+    delay(1);
     yield(); 
 }
