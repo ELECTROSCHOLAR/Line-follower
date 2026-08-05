@@ -308,15 +308,15 @@ void setup() {
     
     prefs.begin("robot", false);
     startMagnetCount = prefs.getInt("startMag", 0);
-    manualBlackThresh = prefs.getInt("blkThresh", 1500);
-    manualWhiteThresh = prefs.getInt("whtThresh", 1500);
+    manualBlackThresh = prefs.getInt("blkThresh", 300);
+    manualWhiteThresh = prefs.getInt("whtThresh", 800);
     selectedLineLogic = prefs.getInt("lineLogic", 0);
     ROTATION_TIME = prefs.getInt("rotTime", 600);
     
     baseSpeed = prefs.getInt("baseSpeed", 80); 
-    Kp = prefs.getFloat("Kp", 0.75);
+    Kp = prefs.getFloat("Kp", 1.00);
     Ki = prefs.getFloat("Ki", 0.00);
-    Kd = prefs.getFloat("Kd", 0.60); 
+    Kd = prefs.getFloat("Kd", 3.00); 
     
     pinMode(BTN_START, INPUT_PULLUP);
     pinMode(BTN_UP, INPUT_PULLUP);
@@ -380,9 +380,9 @@ void loop() {
             tft.println("-- IR SENSOR VIEW --\n");
             
             tft.setTextColor(TFT_WHITE, TFT_BLACK);
-            tft.printf("L1 (IR1): %04d  L2 (IR2): %04d\n", s1, s2);
-            tft.printf("C1 (IR3): %04d  C2 (IR4): %04d\n", s3, s4);
-            tft.printf("R2 (IR5): %04d  R1 (IR6): %04d\n", s5, s6);
+            tft.printf("L1 (IR1): %04d\n  L2 (IR2): %04d\n", s1, s2);
+            tft.printf("C1 (IR3): %04d\n  C2 (IR4): %04d\n", s3, s4);
+            tft.printf("R2 (IR5): %04d\n  R1 (IR6): %04d\n", s5, s6);
             
             tft.setTextColor(TFT_RED, TFT_BLACK);
             tft.println("\n[START] to Exit     ");
@@ -501,16 +501,16 @@ void loop() {
             tft.setTextSize(2);
             tft.setCursor(10, 80);
             tft.setTextColor(TFT_GREEN, TFT_BLACK);
-            tft.println("RUNNING.......");
+            tft.println("RUNNING.....");
             
             tft.setTextSize(2);
             tft.setCursor(10, 130);
             if (selectedLineLogic == 1) {
                 tft.setTextColor(TFT_WHITE, TFT_BLACK);
-                tft.println("MODE: WHITE ON BLACK");
+                tft.println("MODE:WHITE ON BLACK");
             } else {
                 tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-                tft.println("MODE: BLACK ON WHITE");
+                tft.println("MODE:BLACK ON WHITE");
             }
             lastDisplayedMode = selectedLineLogic;
         }
@@ -563,18 +563,22 @@ void loop() {
 
         float error = 0.0;
 
-        if (anyLineDetected) {
+        // FIXED LOGIC: Prioritize sharp turn detection OVER standard line detection
+        if (l1_farLeft && !r1_farRight) {
+            error = -3.5; // Hard sharp left turn catch
+        } 
+        else if (r1_farRight && !l1_farLeft) {
+            error = 3.5;  // Hard sharp right turn catch
+        } 
+        else if (anyLineDetected) {
             float position = (float)weightedSum / totalSum; 
             error = position / 1000.0; 
-        } else {
-            // Precise handling when 90-degree corners cause total line loss temporarily
-            if (l1_farLeft && !r1_farRight)      error = -3.5; // Hard sharp left turn catch
-            else if (r1_farRight && !l1_farLeft) error = 3.5;  // Hard sharp right turn catch
-            else {
-                if (lastError < 0)      error = -3.0; 
-                else if (lastError > 0) error = 3.0; 
-                else                    error = 0.0;
-            }
+        } 
+        else {
+            // Precise handling when corners cause total line loss temporarily
+            if (lastError < 0)      error = -3.0; 
+            else if (lastError > 0) error = 3.0; 
+            else                    error = 0.0;
         }
 
         // --- PID CALCULATION ---
@@ -607,4 +611,4 @@ void loop() {
     }
     delay(1);
     yield(); 
-}
+}  
