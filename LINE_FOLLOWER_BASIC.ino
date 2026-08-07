@@ -44,6 +44,36 @@ float lastError = 0;
 float integral = 0;
 int s1, s2, s3, s4, s5, s6;
 
+// ===== CHASSIS GEOMETRY (mm) — used to tune line-loss recovery =====
+const float SENSOR_ARRAY_WIDTH_MM = 60.0;   // width of the 6-IR sensor bar
+const float CASTER_SPAN_MM        = 110.0;  // spacing between the two front caster balls
+const float WHEEL_TRACK_MM        = 160.0;  // spacing between the rear N20 drive motors
+const float SENSOR_TO_AXLE_MM     = 75.0;   // front sensor bar to rear drive axis (pivot) distance
+
+// A shorter sensor-to-axle "lookahead" means a given lateral/weighted-average
+// error corresponds to a tighter curve happening close to the robot's pivot,
+// so recovery should be a bit punchier. Normalized against a 100mm baseline.
+const float LOOKAHEAD_NORM_MM = 100.0;
+const float LOOKAHEAD_GAIN = LOOKAHEAD_NORM_MM / SENSOR_TO_AXLE_MM;
+
+// ===== ERROR HISTORY / TREND EXTRAPOLATION =====
+// Keeps the last few VALID (line-seen) errors so that, at the instant the
+// line is lost, we can tell "error was climbing steadily toward an edge"
+// (sharp curve exiting the sensor array) apart from "error was flat/centered
+// then suddenly vanished" (a real dropout / gap / junction).
+#define ERR_HISTORY_SIZE 5
+float errorHistory[ERR_HISTORY_SIZE] = {0, 0, 0, 0, 0};
+int errHistIndex = 0;
+int errHistCount = 0;
+
+bool wasLineLost = false;
+unsigned long lineLostSince = 0;
+
+// Classification thresholds
+const float TREND_CURVE_THRESHOLD = 0.35;  // min per-sample slope to call it a "curve exit"
+const int   TREND_CONSISTENCY_MIN = 3;     // consecutive same-direction samples required
+const unsigned long DROPOUT_GRACE_MS = 200; // grace window to ride out a small gap before escalating
+
 // Sequence Variables
 int startMagnetCount; 
 int magnetCount = 0;
@@ -117,6 +147,66 @@ void setMotor(int in1, int in2, int pwmPin, int speed) {
         speed = -speed;
     }
     analogWrite(pwmPin, constrain(speed, 0, 220));
+}
+
+// ===== ERROR HISTORY / TREND HELPERS =====
+
+void pushErrorHistory(float e) {
+    errorHistory[errHistIndex] = e;
+    errHistIndex = (errHistIndex + 1) % ERR_HISTORY_SIZE;
+    if (errHistCount < ERR_HISTORY_SIZE) errHistCount++;
+}
+
+// Returns the stored errors in chronological order (oldest -> newest)
+void getOrderedHistory(float *out) {
+    int start = (errHistIndex - errHistCount + ERR_HISTORY_SIZE) % ERR_HISTORY_SIZE;
+    for (int i = 0; i < errHistCount; i++) {
+        out[i] = errorHistory[(start + i) % ERR_HISTORY_SIZE];
+    }
+}
+
+void resetErrorHistory() {
+    for (int i = 0; i < ERR_HISTORY_SIZE; i++) errorHistory[i] = 0;
+    errHistIndex = 0;
+    errHistCount = 0;
+    wasLineLost = false;
+    lineLostSince = 0;
+}
+
+// Least-squares slope of the recent error samples (per-sample rate of change),
+// plus how many consecutive samples (walking backward from the newest) moved
+// in the same direction. A steady, consistent slope right before the line
+// disappeared is the signature of a curve sliding out of the sensor's view;
+// a flat/inconsistent history right before disappearance is the signature of
+// a genuine dropout (gap, junction, crossing) rather than a curve.
+float computeErrorTrend(int &consistentCount) {
+    float ordered[ERR_HISTORY_SIZE];
+    getOrderedHistory(ordered);
+    consistentCount = 0;
+
+    if (errHistCount < 2) return 0.0;
+
+    int sign = 0;
+    for (int i = errHistCount - 1; i > 0; i--) {
+        float diff = ordered[i] - ordered[i - 1];
+        int s = (diff > 0.02) ? 1 : (diff < -0.02) ? -1 : 0;
+        if (s == 0) break;
+        if (sign == 0) sign = s;
+        else if (s != sign) break;
+        consistentCount++;
+    }
+
+    int n = errHistCount;
+    float sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+    for (int i = 0; i < n; i++) {
+        sumX += i;
+        sumY += ordered[i];
+        sumXY += (float)i * ordered[i];
+        sumXX += (float)i * i;
+    }
+    float denom = (n * sumXX - sumX * sumX);
+    if (fabs(denom) < 1e-6) return 0.0;
+    return (n * sumXY - sumX * sumY) / denom;
 }
 
 // ===== MENU LOGIC =====
@@ -193,6 +283,7 @@ void processButtons() {
                     
                     integral = 0;
                     lastError = 0;
+                    resetErrorHistory();
                     magnetCount = startMagnetCount; 
                     lastDisplayedMode = -1; 
                     
@@ -314,9 +405,9 @@ void setup() {
     ROTATION_TIME = prefs.getInt("rotTime", 600);
     
     baseSpeed = prefs.getInt("baseSpeed", 80); 
-    Kp = prefs.getFloat("Kp", 1.00);
+    Kp = prefs.getFloat("Kp", 1.31);
     Ki = prefs.getFloat("Ki", 0.00);
-    Kd = prefs.getFloat("Kd", 3.00); 
+    Kd = prefs.getFloat("Kd", 3.60); 
     
     pinMode(BTN_START, INPUT_PULLUP);
     pinMode(BTN_UP, INPUT_PULLUP);
@@ -488,6 +579,7 @@ void loop() {
                 delay(ROTATION_TIME); 
                 setMotor(AIN1, AIN2, PWMA, 0); 
                 setMotor(BIN1, BIN2, PWMB, 0);
+                resetErrorHistory();
                 // Will immediately resume line tracking on next loop evaluation!
             }
         }
@@ -566,19 +658,62 @@ void loop() {
         // FIXED LOGIC: Prioritize sharp turn detection OVER standard line detection
         if (l1_farLeft && !r1_farRight) {
             error = -3.5; // Hard sharp left turn catch
+            pushErrorHistory(error);
+            wasLineLost = false;
         } 
         else if (r1_farRight && !l1_farLeft) {
             error = 3.5;  // Hard sharp right turn catch
+            pushErrorHistory(error);
+            wasLineLost = false;
         } 
         else if (anyLineDetected) {
             float position = (float)weightedSum / totalSum; 
             error = position / 1000.0; 
+            pushErrorHistory(error);
+            wasLineLost = false;
         } 
         else {
-            // Precise handling when corners cause total line loss temporarily
-            if (lastError < 0)      error = -3.0; 
-            else if (lastError > 0) error = 3.0; 
-            else                    error = 0.0;
+            // --- LINE LOST: discriminate "curve exiting sensor range" vs "real dropout" ---
+            int consistentCount = 0;
+            float trend = computeErrorTrend(consistentCount); // per-sample slope from recent valid readings
+
+            if (!wasLineLost) {
+                wasLineLost = true;
+                lineLostSince = millis();
+            }
+            unsigned long lostDuration = millis() - lineLostSince;
+
+            // Curve vs jump discrimination: a steady run of same-direction error
+            // growth just before loss means the line was sliding out of sensor
+            // range on a curve. No prior trend (error was flat/centered) means
+            // this is more likely a genuine dropout/gap.
+            bool isCurveExit = (fabs(trend) >= TREND_CURVE_THRESHOLD) &&
+                                (consistentCount >= TREND_CONSISTENCY_MIN);
+
+            if (isCurveExit) {
+                // Error trend extrapolation: bias recovery hard in the direction
+                // the error was already heading. Scale slightly with how steep
+                // the trend was (sharper curve -> punchier correction), and with
+                // the sensor's lookahead distance from the pivot axle.
+                float dirSign = (trend > 0) ? 1.0 : -1.0;
+                float magnitude = fabs(trend) * 4.0 * LOOKAHEAD_GAIN;
+                magnitude = constrain(magnitude, 3.0, 3.5); // stay within normal hard-turn range
+                error = dirSign * magnitude;
+            }
+            else if (lostDuration < DROPOUT_GRACE_MS) {
+                // Sudden jump to zero detection with no prior trend: ride it out
+                // briefly at reduced authority rather than committing to a hard
+                // turn, in case it's just a small gap/junction under the array.
+                error = lastError * 0.4;
+            }
+            else {
+                // Dropout has persisted past the grace window without ever
+                // showing a curve-like trend: fall back to edge-seeking, but
+                // less aggressively than a confirmed curve exit.
+                if (lastError < 0)      error = -2.5;
+                else if (lastError > 0) error = 2.5;
+                else                    error = 0.0;
+            }
         }
 
         // --- PID CALCULATION ---
@@ -611,4 +746,4 @@ void loop() {
     }
     delay(1);
     yield(); 
-}  
+}
